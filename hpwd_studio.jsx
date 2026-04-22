@@ -476,12 +476,21 @@ const SEGMENT_OFFSET_KEYS = {
 export default function HPWDStudio() {
   const [blocks, setBlocks] = useState([]);
   const [connections, setConnections] = useState([]);
-  const [selected, setSelected] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);       // 선택된 블록 id 배열
+  const [selectedConnIds, setSelectedConnIds] = useState([]); // 선택된 연결선 index 배열
   const [connecting, setConnecting] = useState(null);
-  const [draggingConn, setDraggingConn] = useState(null); // 연결선 중간점 드래그
-  const [hoveredConn, setHoveredConn] = useState(null);   // 호버된 연결선 index
-  const [selectedConn, setSelectedConn] = useState(null); // 선택된 연결선 index (클릭 기반, persistent)
+  const [draggingConn, setDraggingConn] = useState(null);
+  const [hoveredConn, setHoveredConn] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+
+  // 박스 드래그 선택 상태: {startX, startY, curX, curY}
+  const [selectionBox, setSelectionBox] = useState(null);
+
+  // 편의를 위해 단일 선택 API를 다중으로 어댑트
+  const selected = selectedIds.length > 0 ? selectedIds[selectedIds.length - 1] : null;
+  const selectedConn = selectedConnIds.length > 0 ? selectedConnIds[selectedConnIds.length - 1] : null;
+  const setSelected = (id) => setSelectedIds(id === null ? [] : [id]);
+  const setSelectedConn = (i) => setSelectedConnIds(i === null ? [] : [i]);
 
   // 클립보드 (Ctrl+C/X/V용) — { blocks: [], connections: [] }
   const clipboardRef = useRef(null);
@@ -539,14 +548,39 @@ export default function HPWDStudio() {
   const handleBlockMouseDown = (e, blockId) => {
     if (e.target.closest('[data-port]')) return;
     e.stopPropagation();
-    setSelected(blockId);
-    setSelectedConn(null);
     const rect = canvasRef.current.getBoundingClientRect();
     const block = blocks.find(b => b.id === blockId);
+
+    // Shift/Ctrl: 다중 선택 토글
+    if (e.shiftKey || e.ctrlKey || e.metaKey) {
+      setSelectedIds(prev => prev.includes(blockId)
+        ? prev.filter(id => id !== blockId)
+        : [...prev, blockId]);
+      setSelectedConnIds([]);
+      return; // shift-select 모드에서는 드래그 시작 안 함
+    }
+
+    // 현재 블록이 이미 선택된 다중 선택의 일부면 선택 유지
+    // 아니면 이 블록만 단독 선택
+    let dragIds;
+    if (selectedIds.includes(blockId)) {
+      dragIds = selectedIds;
+    } else {
+      setSelectedIds([blockId]);
+      dragIds = [blockId];
+    }
+    setSelectedConnIds([]);
+
+    // 드래그할 모든 블록의 시작 위치 저장
+    const startPositions = {};
+    dragIds.forEach(id => {
+      const b = blocks.find(bb => bb.id === id);
+      if (b) startPositions[id] = { x: b.x, y: b.y };
+    });
     draggingRef.current = {
-      blockId,
-      startX: block.x,
-      startY: block.y,
+      blockIds: dragIds,
+      primaryId: blockId,
+      startPositions,
       offsetX: e.clientX - rect.left - block.x,
       offsetY: e.clientY - rect.top - block.y,
     };
@@ -558,22 +592,32 @@ export default function HPWDStudio() {
     const my = e.clientY - rect.top;
     mousePosRef.current = { x: mx, y: my };
 
-    // 블록 드래그: DOM 직접 조작 (React state 건드리지 않음)
+    // 블록 드래그: DOM 직접 조작, 다중 블록 동시 이동 지원
     if (draggingRef.current) {
-      const { blockId, offsetX, offsetY, startX, startY } = draggingRef.current;
-      // 드래그 중에도 실시간 그리드 스냅 적용 (시각적으로 딱딱 정렬되는 느낌)
+      const { blockIds, primaryId, offsetX, offsetY, startPositions } = draggingRef.current;
+      // primary 블록 기준으로 delta 계산, 나머지는 같은 delta 적용
+      const primaryStart = startPositions[primaryId];
       const snappedX = snap(mx - offsetX);
       const snappedY = snap(my - offsetY);
-      const el = blockRefsMap.current[blockId];
-      if (el) {
-        el.style.transform = `translate(${snappedX - startX}px, ${snappedY - startY}px)`;
-      }
-      draggingRef.current.lastX = snappedX;
-      draggingRef.current.lastY = snappedY;
+      const dx = snappedX - primaryStart.x;
+      const dy = snappedY - primaryStart.y;
+      // 모든 선택된 블록을 transform으로 이동
+      blockIds.forEach(id => {
+        const el = blockRefsMap.current[id];
+        if (el) el.style.transform = `translate(${dx}px, ${dy}px)`;
+      });
+      draggingRef.current.dx = dx;
+      draggingRef.current.dy = dy;
       return;
     }
 
-    // 연결선 드래그: 여전히 state 기반 (정밀도 필요)
+    // 박스 선택 드래그 중
+    if (selectionBox) {
+      setSelectionBox(sb => sb ? { ...sb, curX: mx, curY: my } : sb);
+      return;
+    }
+
+    // 연결선 세그먼트 드래그
     if (draggingConn) {
       const { idx, segment, startMouseX, startMouseY, startOffset } = draggingConn;
       const axis = segment.endsWith('Y') ? 'y' : 'x';
@@ -584,7 +628,6 @@ export default function HPWDStudio() {
       ));
     }
 
-    // 연결 중일 때만 mousePos state 업데이트 (점선 따라다니게)
     if (connecting) {
       setMousePos({ x: mx, y: my });
     }
@@ -592,23 +635,55 @@ export default function HPWDStudio() {
 
   const handleCanvasMouseUp = () => {
     if (draggingRef.current) {
-      const { blockId, lastX, lastY, startX, startY } = draggingRef.current;
-      const el = blockRefsMap.current[blockId];
-      if (el) el.style.transform = '';
-      if (lastX !== undefined) {
-        const snappedX = snap(lastX);
-        const snappedY = snap(lastY);
-        // 실제로 위치가 바뀐 경우에만 undo history 기록
-        if (snappedX !== startX || snappedY !== startY) {
-          pushHistory(blocks, connections);
-        }
-        setBlocks(bs => bs.map(b => b.id === blockId
-          ? { ...b, x: snappedX, y: snappedY } : b));
+      const { blockIds, startPositions, dx, dy } = draggingRef.current;
+      // transform 초기화
+      blockIds.forEach(id => {
+        const el = blockRefsMap.current[id];
+        if (el) el.style.transform = '';
+      });
+      if (dx !== undefined && (dx !== 0 || dy !== 0)) {
+        pushHistory(blocks, connections);
+        setBlocks(bs => bs.map(b => {
+          if (!blockIds.includes(b.id)) return b;
+          const start = startPositions[b.id];
+          return { ...b, x: start.x + dx, y: start.y + dy };
+        }));
       }
       draggingRef.current = null;
     }
+
+    // 박스 선택 종료 → 사각형 영역 내 블록 + 연결선 선택
+    if (selectionBox) {
+      const box = selectionBox;
+      const x1 = Math.min(box.startX, box.curX);
+      const y1 = Math.min(box.startY, box.curY);
+      const x2 = Math.max(box.startX, box.curX);
+      const y2 = Math.max(box.startY, box.curY);
+
+      // 박스가 너무 작으면 (거의 클릭) 무시
+      if (x2 - x1 > 4 || y2 - y1 > 4) {
+        // 블록: bbox가 완전히 포함되면 선택
+        const pickedBlocks = blocks.filter(b => {
+          const def = TYPES[b.type];
+          const maxPorts = Math.max(def.inputs.length, def.outputs.length);
+          const baseMin = b.type === 'display' ? 70 : 80;
+          const h = Math.max(baseMin, 45 + maxPorts * 20 + 10);
+          return b.x >= x1 && b.y >= y1 && (b.x + 180) <= x2 && (b.y + h) <= y2;
+        }).map(b => b.id);
+
+        // 연결선: source와 target 둘 다 박스 안 블록일 때만 선택
+        const pickedConns = connections
+          .map((c, i) => ({ c, i }))
+          .filter(({ c }) => pickedBlocks.includes(c.from.blockId) && pickedBlocks.includes(c.to.blockId))
+          .map(({ i }) => i);
+
+        setSelectedIds(pickedBlocks);
+        setSelectedConnIds(pickedConns);
+      }
+      setSelectionBox(null);
+    }
+
     if (draggingConn) {
-      // 연결선 세그먼트 드래그 종료 — history는 drag 시작 시점에 이미 기록 (아래 참조)
       setDraggingConn(null);
     }
   };
@@ -695,54 +770,68 @@ export default function HPWDStudio() {
   };
 
   // -------- Clipboard --------
-  // 선택된 블록을 클립보드에 복사 (연결선은 그 블록이 source이자 target인 경우만 포함)
+  // 선택된 블록들을 클립보드에 복사.
+  // 양 끝이 모두 선택된 블록인 연결선도 같이 복사 (내부 연결 보존)
   const doCopy = () => {
-    if (!selected) return;
-    const srcBlock = blocks.find(b => b.id === selected);
-    if (!srcBlock) return;
-    // 블록은 deep clone, outputs/state는 제외
-    const cloneBlock = {
-      ...JSON.parse(JSON.stringify(srcBlock)),
-      outputs: {},
-      state: TYPES[srcBlock.type].stateInit ? JSON.parse(JSON.stringify(TYPES[srcBlock.type].stateInit)) : {},
-    };
+    if (selectedIds.length === 0) return;
+    const cloneBlocks = selectedIds
+      .map(id => blocks.find(b => b.id === id))
+      .filter(Boolean)
+      .map(b => ({
+        ...JSON.parse(JSON.stringify(b)),
+        outputs: {},
+        state: TYPES[b.type].stateInit ? JSON.parse(JSON.stringify(TYPES[b.type].stateInit)) : {},
+      }));
+    const idSet = new Set(selectedIds);
+    const innerConns = connections
+      .filter(c => idSet.has(c.from.blockId) && idSet.has(c.to.blockId))
+      .map(c => JSON.parse(JSON.stringify(c)));
     clipboardRef.current = {
-      blocks: [cloneBlock],
-      connections: [], // 단일 블록이라 내부 연결 없음
+      blocks: cloneBlocks,
+      connections: innerConns,
     };
   };
 
-  // Cut = Copy + Delete
+  // Cut = Copy + 선택된 블록과 연결선 삭제
   const doCut = () => {
-    if (!selected) return;
+    if (selectedIds.length === 0 && selectedConnIds.length === 0) return;
     doCopy();
     pushHistory(blocks, connections);
-    setBlocks(bs => bs.filter(b => b.id !== selected));
-    setConnections(cs => cs.filter(c => c.from.blockId !== selected && c.to.blockId !== selected));
-    setSelected(null);
+    const idSet = new Set(selectedIds);
+    setBlocks(bs => bs.filter(b => !idSet.has(b.id)));
+    setConnections(cs => cs.filter((c, i) => {
+      // 선택된 연결선이거나, 양 끝 중 하나라도 선택된 블록이면 제거
+      if (selectedConnIds.includes(i)) return false;
+      return !idSet.has(c.from.blockId) && !idSet.has(c.to.blockId);
+    }));
+    setSelectedIds([]);
+    setSelectedConnIds([]);
   };
 
-  // 붙여넣기: 새 id 발급, 위치는 원본 + (GRID*2, GRID*2) 오프셋
+  // 붙여넣기: 새 id 발급, +40px 오프셋, 내부 연결도 재매핑
   const doPaste = () => {
     const clip = clipboardRef.current;
     if (!clip || clip.blocks.length === 0) return;
     pushHistory(blocks, connections);
     const idMap = {};
-    const newBlocks = clip.blocks.map(b => {
-      const newId = `b${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    // 같은 type 별로 이름 suffix 카운트 누적
+    const typeCounts = {};
+    blocksRef.current.forEach(b => {
+      typeCounts[b.type] = (typeCounts[b.type] || 0) + 1;
+    });
+    const newBlocks = clip.blocks.map((b, i) => {
+      const newId = `b${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`;
       idMap[b.id] = newId;
-      // 같은 type의 블록 수 세서 이름 suffix 재설정
       const def = TYPES[b.type];
-      const count = blocksRef.current.filter(bb => bb.type === b.type).length + 1;
+      typeCounts[b.type] = (typeCounts[b.type] || 0) + 1;
       return {
         ...b,
         id: newId,
-        name: `${def.name}_${count}`,
+        name: `${def.name}_${typeCounts[b.type]}`,
         x: snap(b.x + GRID_SIZE * 2),
         y: snap(b.y + GRID_SIZE * 2),
       };
     });
-    // 클립보드 내부 연결이 있다면 새 id로 재매핑 (현재는 단일 블록만 지원해서 비어있음)
     const newConns = clip.connections.map(c => ({
       ...JSON.parse(JSON.stringify(c)),
       from: { ...c.from, blockId: idMap[c.from.blockId] },
@@ -750,7 +839,9 @@ export default function HPWDStudio() {
     }));
     setBlocks(bs => [...bs, ...newBlocks]);
     setConnections(cs => [...cs, ...newConns]);
-    setSelected(newBlocks[0]?.id ?? null);
+    // 붙여넣은 블록들을 선택 상태로
+    setSelectedIds(newBlocks.map(b => b.id));
+    setSelectedConnIds([]);
   };
 
   const evaluateBlocks = (prevBlocks, conns, t, dt) => {
@@ -826,26 +917,31 @@ export default function HPWDStudio() {
     return () => clearInterval(id);
   }, [simState.running, stepSimulation]);
 
-  // 키보드 단축키: Delete/Backspace 삭제, Esc 선택 해제, Ctrl+C/X/V 클립보드, Ctrl+Z/Y undo/redo
+  // 키보드 단축키: Delete/Backspace 삭제, Esc 선택 해제, Ctrl+C/X/V 클립보드, Ctrl+Z/Y undo/redo, Ctrl+A 전체 선택
   useEffect(() => {
     const onKey = (e) => {
-      // input/textarea 포커스 시에는 기본 동작 보존 (파라미터 편집 중 단축키 막힘 방지)
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
       const ctrlOrCmd = e.ctrlKey || e.metaKey;
+      const hasBlockSel = selectedIds.length > 0;
+      const hasConnSel = selectedConnIds.length > 0;
+      const hasAnySel = hasBlockSel || hasConnSel;
 
-      // Ctrl/Cmd 조합 단축키
       if (ctrlOrCmd) {
         const key = e.key.toLowerCase();
-        if (key === 'c') {
-          if (selected) { doCopy(); e.preventDefault(); }
+        if (key === 'a') {
+          // 전체 선택
+          setSelectedIds(blocks.map(b => b.id));
+          setSelectedConnIds(connections.map((_, i) => i));
+          e.preventDefault();
+        } else if (key === 'c') {
+          if (hasBlockSel) { doCopy(); e.preventDefault(); }
         } else if (key === 'x') {
-          if (selected) { doCut(); e.preventDefault(); }
+          if (hasAnySel) { doCut(); e.preventDefault(); }
         } else if (key === 'v') {
           doPaste(); e.preventDefault();
         } else if (key === 'z') {
-          // Ctrl+Shift+Z는 redo로 취급 (일반적 관습)
           if (e.shiftKey) { doRedo(); } else { doUndo(); }
           e.preventDefault();
         } else if (key === 'y') {
@@ -854,30 +950,31 @@ export default function HPWDStudio() {
         return;
       }
 
-      // 일반 키
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedConn !== null) {
+        if (hasAnySel) {
           pushHistory(blocks, connections);
-          setConnections(cs => cs.filter((_, i) => i !== selectedConn));
-          setSelectedConn(null);
-          e.preventDefault();
-        } else if (selected) {
-          pushHistory(blocks, connections);
-          setBlocks(bs => bs.filter(b => b.id !== selected));
-          setConnections(cs => cs.filter(c => c.from.blockId !== selected && c.to.blockId !== selected));
-          setSelected(null);
+          const blockIdSet = new Set(selectedIds);
+          const connIdxSet = new Set(selectedConnIds);
+          setBlocks(bs => bs.filter(b => !blockIdSet.has(b.id)));
+          setConnections(cs => cs.filter((c, i) => {
+            if (connIdxSet.has(i)) return false;
+            // 양 끝 중 하나라도 삭제된 블록이면 같이 제거
+            return !blockIdSet.has(c.from.blockId) && !blockIdSet.has(c.to.blockId);
+          }));
+          setSelectedIds([]);
+          setSelectedConnIds([]);
           e.preventDefault();
         }
       } else if (e.key === 'Escape') {
-        setSelectedConn(null);
-        setSelected(null);
+        setSelectedIds([]);
+        setSelectedConnIds([]);
         setConnecting(null);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedConn, selected, blocks, connections]);
+  }, [selectedIds, selectedConnIds, blocks, connections]);
 
   // 블록 파라미터나 연결이 바뀌면 t=0 값 자동 갱신 (시뮬레이션 중이 아닐 때만, 디바운스)
   // 이걸로 Display 블록이 실시간으로 현재 파라미터 기반 초기값을 보여줌
@@ -1175,9 +1272,23 @@ export default function HPWDStudio() {
             }}
             onDragOver={handleCanvasDragOver}
             onDrop={handleCanvasDrop}
+            onMouseDown={(e) => {
+              // 캔버스 div 또는 투명 SVG에서만 박스 드래그 시작 (블록/연결선 위는 제외)
+              // 블록, 포트, 연결선 path/circle/rect 들은 각자 stopPropagation 처리됨
+              // 여기 도달한다는 건 진짜 빈 공간이라는 뜻
+              if (e.button !== 0) return; // 왼쪽 버튼만
+              const rect = canvasRef.current.getBoundingClientRect();
+              const x = e.clientX - rect.left;
+              const y = e.clientY - rect.top;
+              if (!(e.shiftKey || e.ctrlKey || e.metaKey)) {
+                setSelectedIds([]);
+                setSelectedConnIds([]);
+              }
+              setConnecting(null);
+              setSelectionBox({ startX: x, startY: y, curX: x, curY: y });
+            }}
             onMouseMove={handleCanvasMouseMove}
             onMouseUp={handleCanvasMouseUp}
-            onClick={() => { setConnecting(null); setSelected(null); setSelectedConn(null); }}
           >
             <svg className="absolute inset-0 pointer-events-none" width="100%" height="100%">
               {/* 블록 높이를 미리 계산 (연결선 충돌 감지용 장애물 rect) */}
@@ -1208,7 +1319,7 @@ export default function HPWDStudio() {
                   inOffsetX: c.inOffsetX ?? 0,
                 }, obstacles);
                 const isHovered = hoveredConn === i;
-                const isSelected = selectedConn === i;
+                const isSelected = selectedConnIds.includes(i);
                 const isDraggingThis = draggingConn?.idx === i;
                 const highlight = isSelected || isHovered || isDraggingThis;
 
@@ -1238,8 +1349,14 @@ export default function HPWDStudio() {
                       className="cursor-pointer"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setSelectedConn(i);
-                        setSelected(null);
+                        if (e.shiftKey || e.ctrlKey || e.metaKey) {
+                          setSelectedConnIds(prev => prev.includes(i)
+                            ? prev.filter(idx => idx !== i)
+                            : [...prev, i]);
+                        } else {
+                          setSelectedConnIds([i]);
+                          setSelectedIds([]);
+                        }
                       }}
                     />
 
@@ -1338,12 +1455,26 @@ export default function HPWDStudio() {
                   <path d={path.d} stroke="#0891b2" strokeWidth="1.75" strokeDasharray="4 4" fill="none" />
                 );
               })()}
+              {/* 박스 선택 사각형 */}
+              {selectionBox && (() => {
+                const x = Math.min(selectionBox.startX, selectionBox.curX);
+                const y = Math.min(selectionBox.startY, selectionBox.curY);
+                const w = Math.abs(selectionBox.curX - selectionBox.startX);
+                const h = Math.abs(selectionBox.curY - selectionBox.startY);
+                return (
+                  <rect
+                    x={x} y={y} width={w} height={h}
+                    fill="#0891b2" fillOpacity="0.08"
+                    stroke="#0891b2" strokeWidth="1" strokeDasharray="4 2"
+                  />
+                );
+              })()}
             </svg>
 
             {blocks.map(block => {
               const def = TYPES[block.type];
               const Icon = def.icon;
-              const isSel = selected === block.id;
+              const isSel = selectedIds.includes(block.id);
               const maxPorts = Math.max(def.inputs.length, def.outputs.length);
               const baseMin = block.type === 'display' ? 70 : 80;
               const height = Math.max(baseMin, 45 + maxPorts * 20 + 10);
@@ -1358,7 +1489,6 @@ export default function HPWDStudio() {
                     willChange: 'transform',
                   }}
                   onMouseDown={(e) => handleBlockMouseDown(e, block.id)}
-                  onClick={(e) => { e.stopPropagation(); setSelected(block.id); setSelectedConn(null); }}
                 >
                   <div className="h-6 px-2 flex items-center gap-1.5 border-b rounded-t-md"
                        style={{ borderColor: def.color + '30', background: def.color + '0d' }}>
@@ -1511,8 +1641,35 @@ export default function HPWDStudio() {
               </button>
             )}
           </div>
-          {!selectedBlock ? (
-            <div className="p-4 text-slate-400 text-[11px] text-center">블록을 선택하세요</div>
+
+          {/* 다중 선택 시 요약만 표시, 파라미터 편집은 단일 선택 시만 */}
+          {selectedIds.length > 1 || selectedConnIds.length > 0 ? (
+            <div className="p-3 space-y-2">
+              <div className="text-[11px] text-sky-700 font-semibold">
+                다중 선택됨
+              </div>
+              {selectedIds.length > 0 && (
+                <div className="text-[10px] text-slate-600">
+                  블록 <span className="font-semibold text-slate-900">{selectedIds.length}</span>개
+                </div>
+              )}
+              {selectedConnIds.length > 0 && (
+                <div className="text-[10px] text-slate-600">
+                  연결선 <span className="font-semibold text-slate-900">{selectedConnIds.length}</span>개
+                </div>
+              )}
+              <div className="text-[10px] text-slate-400 italic pt-2 leading-relaxed">
+                단축키:<br/>
+                · Delete — 선택 항목 삭제<br/>
+                · Ctrl+C / X — 복사 / 잘라내기<br/>
+                · 드래그 — 선택된 블록 전체 이동<br/>
+                · Esc — 선택 해제
+              </div>
+            </div>
+          ) : !selectedBlock ? (
+            <div className="p-4 text-slate-400 text-[11px] text-center leading-relaxed">
+              블록을 선택하거나<br/>빈 캔버스에서 드래그해<br/>여러 항목 선택
+            </div>
           ) : (
             <div className="p-3 space-y-4">
               <div>
@@ -1644,11 +1801,10 @@ export default function HPWDStudio() {
           Connecting: {connecting ? `${blocks.find(b => b.id === connecting.blockId)?.name}.${connecting.portKey} (${connecting.direction})` : 'none'}
         </span>
         <span>({mousePos.x.toFixed(0)}, {mousePos.y.toFixed(0)})</span>
-        {selectedConn !== null && (
-          <span className="text-sky-600">선택된 연결선 #{selectedConn} · Delete 키로 삭제</span>
-        )}
-        {selected && selectedConn === null && (
-          <span className="text-sky-600">선택된 블록 · Delete 키로 삭제</span>
+        {(selectedIds.length > 0 || selectedConnIds.length > 0) && (
+          <span className="text-sky-600">
+            선택됨: 블록 {selectedIds.length} · 연결선 {selectedConnIds.length} · Delete 키로 삭제
+          </span>
         )}
         <div className="flex-1" />
         <span>HPWD Simulation Studio · quasi-steady seq. subst.</span>
