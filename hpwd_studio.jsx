@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Play, Square, RotateCcw, Trash2, Save, FolderOpen, Settings, Activity, Zap, Wind, Droplet, Thermometer, Gauge, CircleDot, Box, BarChart3, ChevronRight, ChevronDown, Hash, TrendingUp, Waves, Plus, Minus, X, Divide, Eye, Download } from 'lucide-react';
+import { Play, Square, RotateCcw, Trash2, Save, FolderOpen, Settings, Activity, Zap, Wind, Droplet, Thermometer, Gauge, CircleDot, Box, BarChart3, ChevronRight, ChevronDown, Hash, TrendingUp, Waves, Plus, Minus, X, Divide, Eye, Download, Undo, Redo } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
 const TYPES = {
@@ -483,6 +483,18 @@ export default function HPWDStudio() {
   const [selectedConn, setSelectedConn] = useState(null); // 선택된 연결선 index (클릭 기반, persistent)
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
+  // 클립보드 (Ctrl+C/X/V용) — { blocks: [], connections: [] }
+  const clipboardRef = useRef(null);
+
+  // Undo/Redo 스택 — 각 엔트리는 { blocks, connections }
+  const [undoStack, setUndoStack] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
+  const undoStackRef = useRef([]);
+  const redoStackRef = useRef([]);
+  undoStackRef.current = undoStack;
+  redoStackRef.current = redoStack;
+  const MAX_HISTORY = 50;
+
   const [simState, setSimState] = useState({
     running: false, t: 0, dt: 1.0, t_final: 600, history: [], log: [],
   });
@@ -514,6 +526,7 @@ export default function HPWDStudio() {
     const def = TYPES[typeKey];
     const id = `b${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const params = Object.fromEntries(def.parameters.map(p => [p.key, p.value]));
+    pushHistory(blocks, connections);
     setBlocks(bs => [...bs, {
       id, type: typeKey, x: snap(x - 90), y: snap(y - 40),
       name: `${def.name}_${bs.filter(b => b.type === typeKey).length + 1}`,
@@ -579,17 +592,25 @@ export default function HPWDStudio() {
 
   const handleCanvasMouseUp = () => {
     if (draggingRef.current) {
-      const { blockId, lastX, lastY } = draggingRef.current;
+      const { blockId, lastX, lastY, startX, startY } = draggingRef.current;
       const el = blockRefsMap.current[blockId];
       if (el) el.style.transform = '';
       if (lastX !== undefined) {
-        // 그리드 스냅: 20px 배수로 정렬
+        const snappedX = snap(lastX);
+        const snappedY = snap(lastY);
+        // 실제로 위치가 바뀐 경우에만 undo history 기록
+        if (snappedX !== startX || snappedY !== startY) {
+          pushHistory(blocks, connections);
+        }
         setBlocks(bs => bs.map(b => b.id === blockId
-          ? { ...b, x: snap(lastX), y: snap(lastY) } : b));
+          ? { ...b, x: snappedX, y: snappedY } : b));
       }
       draggingRef.current = null;
     }
-    setDraggingConn(null);
+    if (draggingConn) {
+      // 연결선 세그먼트 드래그 종료 — history는 drag 시작 시점에 이미 기록 (아래 참조)
+      setDraggingConn(null);
+    }
   };
 
   const handlePortClick = (e, blockId, portKey, direction) => {
@@ -598,6 +619,7 @@ export default function HPWDStudio() {
     if (connecting.direction === direction || connecting.blockId === blockId) { setConnecting(null); return; }
     const from = connecting.direction === 'out' ? connecting : { blockId, portKey };
     const to = connecting.direction === 'in' ? connecting : { blockId, portKey };
+    pushHistory(blocks, connections);
     setConnections(cs => {
       const filtered = cs.filter(c => !(c.to.blockId === to.blockId && c.to.portKey === to.portKey));
       return [...filtered, {
@@ -610,6 +632,7 @@ export default function HPWDStudio() {
   };
 
   const deleteBlock = (id) => {
+    pushHistory(blocks, connections);
     setBlocks(bs => bs.filter(b => b.id !== id));
     setConnections(cs => cs.filter(c => c.from.blockId !== id && c.to.blockId !== id));
     if (selected === id) setSelected(null);
@@ -625,6 +648,111 @@ export default function HPWDStudio() {
 
   // 단일 시간 스텝 평가: blocks와 t가 주어지면 outputs 계산해서 반환
   // (initSim과 stepSimulation이 공유하는 순수 평가 함수)
+  // -------- Undo / Redo --------
+  // 현재 상태를 undo 스택에 push, redo 스택 비움 (새 액션 시작 시)
+  const pushHistory = (prevBlocks, prevConns) => {
+    setUndoStack(s => {
+      const next = [...s, {
+        blocks: JSON.parse(JSON.stringify(prevBlocks)),
+        connections: JSON.parse(JSON.stringify(prevConns)),
+      }];
+      if (next.length > MAX_HISTORY) next.shift();
+      return next;
+    });
+    setRedoStack([]);
+  };
+
+  const doUndo = () => {
+    const stack = undoStackRef.current;
+    if (stack.length === 0) return;
+    const prev = stack[stack.length - 1];
+    // 현재 상태를 redo로 저장
+    setRedoStack(r => [...r, {
+      blocks: JSON.parse(JSON.stringify(blocks)),
+      connections: JSON.parse(JSON.stringify(connections)),
+    }]);
+    setUndoStack(s => s.slice(0, -1));
+    setBlocks(prev.blocks);
+    setConnections(prev.connections);
+    setSelected(null);
+    setSelectedConn(null);
+  };
+
+  const doRedo = () => {
+    const stack = redoStackRef.current;
+    if (stack.length === 0) return;
+    const next = stack[stack.length - 1];
+    // 현재 상태를 undo로 다시 저장
+    setUndoStack(s => [...s, {
+      blocks: JSON.parse(JSON.stringify(blocks)),
+      connections: JSON.parse(JSON.stringify(connections)),
+    }]);
+    setRedoStack(r => r.slice(0, -1));
+    setBlocks(next.blocks);
+    setConnections(next.connections);
+    setSelected(null);
+    setSelectedConn(null);
+  };
+
+  // -------- Clipboard --------
+  // 선택된 블록을 클립보드에 복사 (연결선은 그 블록이 source이자 target인 경우만 포함)
+  const doCopy = () => {
+    if (!selected) return;
+    const srcBlock = blocks.find(b => b.id === selected);
+    if (!srcBlock) return;
+    // 블록은 deep clone, outputs/state는 제외
+    const cloneBlock = {
+      ...JSON.parse(JSON.stringify(srcBlock)),
+      outputs: {},
+      state: TYPES[srcBlock.type].stateInit ? JSON.parse(JSON.stringify(TYPES[srcBlock.type].stateInit)) : {},
+    };
+    clipboardRef.current = {
+      blocks: [cloneBlock],
+      connections: [], // 단일 블록이라 내부 연결 없음
+    };
+  };
+
+  // Cut = Copy + Delete
+  const doCut = () => {
+    if (!selected) return;
+    doCopy();
+    pushHistory(blocks, connections);
+    setBlocks(bs => bs.filter(b => b.id !== selected));
+    setConnections(cs => cs.filter(c => c.from.blockId !== selected && c.to.blockId !== selected));
+    setSelected(null);
+  };
+
+  // 붙여넣기: 새 id 발급, 위치는 원본 + (GRID*2, GRID*2) 오프셋
+  const doPaste = () => {
+    const clip = clipboardRef.current;
+    if (!clip || clip.blocks.length === 0) return;
+    pushHistory(blocks, connections);
+    const idMap = {};
+    const newBlocks = clip.blocks.map(b => {
+      const newId = `b${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      idMap[b.id] = newId;
+      // 같은 type의 블록 수 세서 이름 suffix 재설정
+      const def = TYPES[b.type];
+      const count = blocksRef.current.filter(bb => bb.type === b.type).length + 1;
+      return {
+        ...b,
+        id: newId,
+        name: `${def.name}_${count}`,
+        x: snap(b.x + GRID_SIZE * 2),
+        y: snap(b.y + GRID_SIZE * 2),
+      };
+    });
+    // 클립보드 내부 연결이 있다면 새 id로 재매핑 (현재는 단일 블록만 지원해서 비어있음)
+    const newConns = clip.connections.map(c => ({
+      ...JSON.parse(JSON.stringify(c)),
+      from: { ...c.from, blockId: idMap[c.from.blockId] },
+      to: { ...c.to, blockId: idMap[c.to.blockId] },
+    }));
+    setBlocks(bs => [...bs, ...newBlocks]);
+    setConnections(cs => [...cs, ...newConns]);
+    setSelected(newBlocks[0]?.id ?? null);
+  };
+
   const evaluateBlocks = (prevBlocks, conns, t, dt) => {
     return prevBlocks.map(b => {
       const def = TYPES[b.type];
@@ -698,18 +826,43 @@ export default function HPWDStudio() {
     return () => clearInterval(id);
   }, [simState.running, stepSimulation]);
 
-  // Delete/Backspace 키: 선택된 연결선 또는 블록 삭제
+  // 키보드 단축키: Delete/Backspace 삭제, Esc 선택 해제, Ctrl+C/X/V 클립보드, Ctrl+Z/Y undo/redo
   useEffect(() => {
     const onKey = (e) => {
-      // input/textarea에 포커스가 있으면 무시 (파라미터 편집 중 방해 방지)
+      // input/textarea 포커스 시에는 기본 동작 보존 (파라미터 편집 중 단축키 막힘 방지)
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+      const ctrlOrCmd = e.ctrlKey || e.metaKey;
+
+      // Ctrl/Cmd 조합 단축키
+      if (ctrlOrCmd) {
+        const key = e.key.toLowerCase();
+        if (key === 'c') {
+          if (selected) { doCopy(); e.preventDefault(); }
+        } else if (key === 'x') {
+          if (selected) { doCut(); e.preventDefault(); }
+        } else if (key === 'v') {
+          doPaste(); e.preventDefault();
+        } else if (key === 'z') {
+          // Ctrl+Shift+Z는 redo로 취급 (일반적 관습)
+          if (e.shiftKey) { doRedo(); } else { doUndo(); }
+          e.preventDefault();
+        } else if (key === 'y') {
+          doRedo(); e.preventDefault();
+        }
+        return;
+      }
+
+      // 일반 키
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedConn !== null) {
+          pushHistory(blocks, connections);
           setConnections(cs => cs.filter((_, i) => i !== selectedConn));
           setSelectedConn(null);
           e.preventDefault();
         } else if (selected) {
+          pushHistory(blocks, connections);
           setBlocks(bs => bs.filter(b => b.id !== selected));
           setConnections(cs => cs.filter(c => c.from.blockId !== selected && c.to.blockId !== selected));
           setSelected(null);
@@ -723,7 +876,8 @@ export default function HPWDStudio() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedConn, selected]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedConn, selected, blocks, connections]);
 
   // 블록 파라미터나 연결이 바뀌면 t=0 값 자동 갱신 (시뮬레이션 중이 아닐 때만, 디바운스)
   // 이걸로 Display 블록이 실시간으로 현재 파라미터 기반 초기값을 보여줌
@@ -926,6 +1080,11 @@ export default function HPWDStudio() {
           <ToolBtn as="span" icon={FolderOpen} label="Load" />
           <input type="file" accept=".json" className="hidden" onChange={loadProject} />
         </label>
+        <div className="w-px h-5 bg-slate-200 mx-1.5" />
+        <ToolBtn onClick={doUndo} icon={Undo} label="Undo" disabled={undoStack.length === 0}
+                 title="Ctrl+Z" />
+        <ToolBtn onClick={doRedo} icon={Redo} label="Redo" disabled={redoStack.length === 0}
+                 title="Ctrl+Y" />
         <div className="w-px h-5 bg-slate-200 mx-1.5" />
         <ToolBtn onClick={runSim} icon={Play} label="Run" disabled={simState.running} color="text-emerald-600 hover:bg-emerald-50" />
         <ToolBtn onClick={stopSim} icon={Square} label="Stop" disabled={!simState.running} color="text-red-600 hover:bg-red-50" />
@@ -1498,11 +1657,12 @@ export default function HPWDStudio() {
   );
 }
 
-function ToolBtn({ icon: Icon, label, onClick, disabled, color = 'text-slate-700 hover:bg-slate-100', as }) {
+function ToolBtn({ icon: Icon, label, onClick, disabled, color = 'text-slate-700 hover:bg-slate-100', as, title }) {
   const Comp = as || 'button';
   return (
     <Comp
       onClick={disabled ? undefined : onClick}
+      title={title}
       className={`px-2 py-1 rounded flex items-center gap-1 text-[11px] transition-colors ${color} ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
     >
       <Icon size={13} />
