@@ -634,35 +634,66 @@ function HPWDStudio() {
     setBlocks(bs => bs.map(b => b.id === blockId ? { ...b, name } : b));
   };
 
+  // 단일 시간 스텝 평가: blocks와 t가 주어지면 outputs 계산해서 반환
+  // (initSim과 stepSimulation이 공유하는 순수 평가 함수)
+  const evaluateBlocks = (prevBlocks, conns, t, dt) => {
+    return prevBlocks.map(b => {
+      const def = TYPES[b.type];
+      const inputs = {};
+      def.inputs.forEach(inp => {
+        const conn = conns.find(c => c.to.blockId === b.id && c.to.portKey === inp.key);
+        if (conn) {
+          const src = prevBlocks.find(bb => bb.id === conn.from.blockId);
+          if (src?.outputs?.[conn.from.portKey] !== undefined) {
+            inputs[inp.key] = src.outputs[conn.from.portKey];
+          }
+        }
+      });
+      const newState = b.state ? { ...b.state } : {};
+      const outputs = def.compute(inputs, b.params, t, newState, dt);
+      return { ...b, outputs, state: newState, lastInputs: inputs };
+    });
+  };
+
+  // 스냅샷 생성: 현재 모든 블록 outputs을 {t, Block.key: value} 딕셔너리로
+  const makeSnapshot = (blocksList, t) => {
+    const snapshot = { t };
+    blocksList.forEach(b => {
+      Object.entries(b.outputs || {}).forEach(([k, v]) => {
+        snapshot[`${b.name}.${k}`] = typeof v === 'number' ? Number(v.toFixed(4)) : v;
+      });
+    });
+    return snapshot;
+  };
+
+  // t=0 초기값 평가: 2회 반복 (연결된 신호가 첫 pass에서는 undefined → default fallback,
+  // 2회째에 전파된 값 사용). 그 결과를 history[0]에 기록.
+  const initSim = () => {
+    const conns = connectionsRef.current;
+    const b0 = blocks;
+    // pass 1: 초기 evaluation
+    let evaluated = evaluateBlocks(b0, conns, 0, simState.dt);
+    // pass 2: 전파 (source → math → display 순으로 값이 전달되도록)
+    evaluated = evaluateBlocks(evaluated, conns, 0, simState.dt);
+
+    setBlocks(evaluated);
+    setSimState(s => ({
+      ...s,
+      t: 0,
+      history: [makeSnapshot(evaluated, 0)],
+      log: [...s.log, `◦ Initialized @ t=0.0s`],
+    }));
+  };
+
   const stepSimulation = useCallback(() => {
     setBlocks(prevBlocks => {
       const conns = connectionsRef.current;
-      return prevBlocks.map(b => {
-        const def = TYPES[b.type];
-        const inputs = {};
-        def.inputs.forEach(inp => {
-          const conn = conns.find(c => c.to.blockId === b.id && c.to.portKey === inp.key);
-          if (conn) {
-            const src = prevBlocks.find(bb => bb.id === conn.from.blockId);
-            if (src?.outputs?.[conn.from.portKey] !== undefined) {
-              inputs[inp.key] = src.outputs[conn.from.portKey];
-            }
-          }
-        });
-        const newState = b.state ? { ...b.state } : {};
-        const outputs = def.compute(inputs, b.params, simRef.current.t, newState, simRef.current.dt);
-        return { ...b, outputs, state: newState, lastInputs: inputs };
-      });
+      return evaluateBlocks(prevBlocks, conns, simRef.current.t, simRef.current.dt);
     });
 
     setSimState(s => {
       const t_new = s.t + s.dt;
-      const snapshot = { t: t_new };
-      blocksRef.current.forEach(b => {
-        Object.entries(b.outputs || {}).forEach(([k, v]) => {
-          snapshot[`${b.name}.${k}`] = typeof v === 'number' ? Number(v.toFixed(4)) : v;
-        });
-      });
+      const snapshot = makeSnapshot(blocksRef.current, t_new);
       return { ...s, t: t_new, history: [...s.history, snapshot], running: t_new < s.t_final && s.running };
     });
   }, []);
@@ -705,13 +736,57 @@ function HPWDStudio() {
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedConn, selected]);
 
-  const runSim = () => setSimState(s => ({ ...s, running: true, log: [...s.log, `▶ Run @ t=${s.t.toFixed(1)}s`] }));
+  // 블록 파라미터나 연결이 바뀌면 t=0 값 자동 갱신 (시뮬레이션 중이 아닐 때만, 디바운스)
+  // 이걸로 Display 블록이 실시간으로 현재 파라미터 기반 초기값을 보여줌
+  useEffect(() => {
+    if (simState.running) return;
+    if (blocks.length === 0) return;
+    const timer = setTimeout(() => {
+      const conns = connectionsRef.current;
+      // 2-pass 평가로 신호 전파
+      let evaluated = evaluateBlocks(blocks, conns, 0, simState.dt);
+      evaluated = evaluateBlocks(evaluated, conns, 0, simState.dt);
+      // outputs/lastInputs만 업데이트 (x,y 위치 변경 방지)
+      setBlocks(bs => bs.map(b => {
+        const ev = evaluated.find(e => e.id === b.id);
+        return ev ? { ...b, outputs: ev.outputs, lastInputs: ev.lastInputs } : b;
+      }));
+    }, 100);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    // 블록 파라미터 변화 감지 (outputs/x/y 제외)
+    JSON.stringify(blocks.map(b => ({ id: b.id, type: b.type, name: b.name, params: b.params }))),
+    connections,
+    simState.running,
+  ]);
+
+  const runSim = () => {
+    // history가 비어있으면(초기 로드 직후) t=0 스냅샷 먼저 기록
+    if (simState.history.length === 0) {
+      initSim();
+    }
+    setSimState(s => ({ ...s, running: true, log: [...s.log, `▶ Run @ t=${s.t.toFixed(1)}s`] }));
+  };
   const stopSim = () => setSimState(s => ({ ...s, running: false, log: [...s.log, `■ Stop @ t=${s.t.toFixed(1)}s`] }));
   const resetSim = () => {
-    setSimState({ running: false, t: 0, dt: 1.0, t_final: 600, history: [], log: ['↺ Reset'] });
-    setBlocks(bs => bs.map(b => {
+    // 블록 state는 초기화, dt/t_final은 유지
+    const resetBlocks = blocks.map(b => {
       const def = TYPES[b.type];
       return { ...b, outputs: {}, state: def.stateInit ? JSON.parse(JSON.stringify(def.stateInit)) : {} };
+    });
+    // t=0에서 2-pass 평가 (source → math → display 전파)
+    const conns = connectionsRef.current;
+    let evaluated = evaluateBlocks(resetBlocks, conns, 0, simState.dt);
+    evaluated = evaluateBlocks(evaluated, conns, 0, simState.dt);
+
+    setBlocks(evaluated);
+    setSimState(s => ({
+      ...s,
+      running: false,
+      t: 0,
+      history: [makeSnapshot(evaluated, 0)],
+      log: ['↺ Reset @ t=0.0s'],
     }));
   };
 
