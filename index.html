@@ -77,7 +77,7 @@
     const ChevronDown  = _mkIcon(<polyline points="6 9 12 15 18 9" />);
 
     // ============================================================
-    // HPWD Studio 본체 (JSX 파일 내용 그대로)
+    // HPWD Studio 본체
     // ============================================================
 const TYPES = {
   ambient: {
@@ -379,7 +379,6 @@ function HPWDStudio() {
   const [connections, setConnections] = useState([]);
   const [selected, setSelected] = useState(null);
   const [connecting, setConnecting] = useState(null);
-  const [dragging, setDragging] = useState(null);
   const [draggingConn, setDraggingConn] = useState(null); // 연결선 중간점 드래그
   const [hoveredConn, setHoveredConn] = useState(null);   // 호버된 연결선 index
   const [selectedConn, setSelectedConn] = useState(null); // 선택된 연결선 index (클릭 기반, persistent)
@@ -392,6 +391,11 @@ function HPWDStudio() {
   simRef.current = simState;
 
   const canvasRef = useRef(null);
+  const blockRefsMap = useRef({});  // blockId → DOM element ref
+  const draggingRef = useRef(null); // 드래그 상태를 ref로 (state 대신)
+  const draggingConnRef = useRef(null);
+  const mousePosRef = useRef({ x: 0, y: 0 });
+  const rafRef = useRef(null);      // requestAnimationFrame id
   const [expandedCats, setExpandedCats] = useState({ source: true, refrigerant: true, air: true, output: true });
 
   const handleLibraryDragStart = (e, typeKey) => {
@@ -421,29 +425,43 @@ function HPWDStudio() {
   };
 
   const handleBlockMouseDown = (e, blockId) => {
-    // 포트 또는 포트 하위 요소 클릭 시 블록 드래그 방지
     if (e.target.closest('[data-port]')) return;
     e.stopPropagation();
     setSelected(blockId);
     setSelectedConn(null);
     const rect = canvasRef.current.getBoundingClientRect();
     const block = blocks.find(b => b.id === blockId);
-    setDragging({
+    draggingRef.current = {
       blockId,
+      startX: block.x,
+      startY: block.y,
       offsetX: e.clientX - rect.left - block.x,
       offsetY: e.clientY - rect.top - block.y,
-    });
+    };
   };
 
   const handleCanvasMouseMove = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
-    setMousePos({ x: mx, y: my });
-    if (dragging) {
-      setBlocks(bs => bs.map(b => b.id === dragging.blockId
-        ? { ...b, x: mx - dragging.offsetX, y: my - dragging.offsetY } : b));
+    mousePosRef.current = { x: mx, y: my };
+
+    // 블록 드래그: DOM 직접 조작 (React state 건드리지 않음)
+    if (draggingRef.current) {
+      const { blockId, offsetX, offsetY, startX, startY } = draggingRef.current;
+      const newX = mx - offsetX;
+      const newY = my - offsetY;
+      const el = blockRefsMap.current[blockId];
+      if (el) {
+        // transform으로 시각적 이동 (left/top은 원래 위치 유지)
+        el.style.transform = `translate(${newX - startX}px, ${newY - startY}px)`;
+      }
+      draggingRef.current.lastX = newX;
+      draggingRef.current.lastY = newY;
+      return; // 드래그 중엔 SVG, 연결선 업데이트 건너뜀 → 성능 확보
     }
+
+    // 연결선 드래그: 여전히 state 기반 (정밀도 필요)
     if (draggingConn) {
       const { idx, segment, startMouseX, startMouseY, startOffset } = draggingConn;
       const axis = segment.endsWith('Y') ? 'y' : 'x';
@@ -453,6 +471,26 @@ function HPWDStudio() {
         i === idx ? { ...c, [offsetKey]: startOffset + delta } : c
       ));
     }
+
+    // 연결 중일 때만 mousePos state 업데이트 (점선 따라다니게)
+    if (connecting) {
+      setMousePos({ x: mx, y: my });
+    }
+  };
+
+  const handleCanvasMouseUp = () => {
+    if (draggingRef.current) {
+      const { blockId, lastX, lastY } = draggingRef.current;
+      // DOM transform 제거하고 실제 좌표를 state에 반영
+      const el = blockRefsMap.current[blockId];
+      if (el) el.style.transform = '';
+      if (lastX !== undefined) {
+        setBlocks(bs => bs.map(b => b.id === blockId
+          ? { ...b, x: lastX, y: lastY } : b));
+      }
+      draggingRef.current = null;
+    }
+    setDraggingConn(null);
   };
 
   const handlePortClick = (e, blockId, portKey, direction) => {
@@ -730,7 +768,7 @@ function HPWDStudio() {
             onDragOver={handleCanvasDragOver}
             onDrop={handleCanvasDrop}
             onMouseMove={handleCanvasMouseMove}
-            onMouseUp={() => { setDragging(null); setDraggingConn(null); }}
+            onMouseUp={handleCanvasMouseUp}
             onClick={() => { setConnecting(null); setSelected(null); setSelectedConn(null); }}
           >
             <svg className="absolute inset-0 pointer-events-none" width="100%" height="100%">
@@ -890,10 +928,12 @@ function HPWDStudio() {
               return (
                 <div
                   key={block.id}
-                  className={`absolute rounded-md bg-white shadow-sm transition-all ${isSel ? 'ring-2 ring-cyan-500 ring-offset-1 shadow-md' : 'hover:shadow-md'}`}
+                  ref={(el) => { if (el) blockRefsMap.current[block.id] = el; }}
+                  className={`absolute rounded-md bg-white shadow-sm ${isSel ? 'ring-2 ring-cyan-500 ring-offset-1 shadow-md' : 'hover:shadow-md'}`}
                   style={{
                     left: block.x, top: block.y, width: 180, height,
                     border: `1px solid ${isSel ? def.color : '#e2e8f0'}`,
+                    willChange: 'transform',
                   }}
                   onMouseDown={(e) => handleBlockMouseDown(e, block.id)}
                   onClick={(e) => { e.stopPropagation(); setSelected(block.id); setSelectedConn(null); }}
