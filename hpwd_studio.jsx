@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Play, Square, RotateCcw, Trash2, Save, FolderOpen, Settings, Activity, Zap, Wind, Droplet, Thermometer, Gauge, CircleDot, Box, BarChart3, ChevronRight, ChevronDown } from 'lucide-react';
+import { Play, Square, RotateCcw, Trash2, Save, FolderOpen, Settings, Activity, Zap, Wind, Droplet, Thermometer, Gauge, CircleDot, Box, BarChart3, ChevronRight, ChevronDown, Hash, TrendingUp, Waves, Plus, Minus, X, Divide, Eye } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
 const TYPES = {
@@ -216,6 +216,105 @@ const TYPES = {
       };
     },
   },
+  // ================ 테스트용 신호 생성 ================
+  constant: {
+    typeNo: 10, name: 'Constant', category: 'source', color: '#6366f1', icon: Hash,
+    desc: '상수 값 생성',
+    parameters: [
+      { key: 'value', label: 'Value', value: 1.0, unit: '' },
+    ],
+    inputs: [],
+    outputs: [{ key: 'y', label: 'y', unit: '' }],
+    compute: (inp, par) => ({ y: par.value }),
+  },
+  ramp: {
+    typeNo: 11, name: 'Ramp', category: 'source', color: '#6366f1', icon: TrendingUp,
+    desc: '선형 시간 함수: y = slope·t + offset',
+    parameters: [
+      { key: 'slope', label: 'Slope', value: 1.0, unit: '/s' },
+      { key: 'offset', label: 'Offset', value: 0.0, unit: '' },
+    ],
+    inputs: [],
+    outputs: [{ key: 'y', label: 'y', unit: '' }],
+    compute: (inp, par, t) => ({ y: par.slope * t + par.offset }),
+  },
+  sine: {
+    typeNo: 12, name: 'Sine', category: 'source', color: '#6366f1', icon: Waves,
+    desc: '사인파: y = A·sin(2πft) + offset',
+    parameters: [
+      { key: 'A', label: 'Amplitude', value: 1.0, unit: '' },
+      { key: 'freq', label: 'Frequency', value: 0.1, unit: 'Hz' },
+      { key: 'offset', label: 'Offset', value: 0.0, unit: '' },
+    ],
+    inputs: [],
+    outputs: [{ key: 'y', label: 'y', unit: '' }],
+    compute: (inp, par, t) => ({
+      y: par.A * Math.sin(2 * Math.PI * par.freq * t) + par.offset,
+    }),
+  },
+
+  // ================ 사칙연산 ================
+  add: {
+    typeNo: 20, name: 'Add', category: 'math', color: '#10b981', icon: Plus,
+    desc: '덧셈: y = a + b',
+    parameters: [],
+    inputs: [
+      { key: 'a', label: 'a', unit: '' },
+      { key: 'b', label: 'b', unit: '' },
+    ],
+    outputs: [{ key: 'y', label: 'a+b', unit: '' }],
+    compute: (inp) => ({ y: (inp.a ?? 0) + (inp.b ?? 0) }),
+  },
+  subtract: {
+    typeNo: 21, name: 'Subtract', category: 'math', color: '#10b981', icon: Minus,
+    desc: '뺄셈: y = a − b',
+    parameters: [],
+    inputs: [
+      { key: 'a', label: 'a', unit: '' },
+      { key: 'b', label: 'b', unit: '' },
+    ],
+    outputs: [{ key: 'y', label: 'a−b', unit: '' }],
+    compute: (inp) => ({ y: (inp.a ?? 0) - (inp.b ?? 0) }),
+  },
+  multiply: {
+    typeNo: 22, name: 'Multiply', category: 'math', color: '#10b981', icon: X,
+    desc: '곱셈: y = a × b',
+    parameters: [],
+    inputs: [
+      { key: 'a', label: 'a', unit: '' },
+      { key: 'b', label: 'b', unit: '' },
+    ],
+    outputs: [{ key: 'y', label: 'a·b', unit: '' }],
+    compute: (inp) => ({ y: (inp.a ?? 0) * (inp.b ?? 1) }),
+  },
+  divide: {
+    typeNo: 23, name: 'Divide', category: 'math', color: '#10b981', icon: Divide,
+    desc: '나눗셈: y = a ÷ b (b=0 시 0 반환)',
+    parameters: [],
+    inputs: [
+      { key: 'a', label: 'a', unit: '' },
+      { key: 'b', label: 'b', unit: '' },
+    ],
+    outputs: [{ key: 'y', label: 'a/b', unit: '' }],
+    compute: (inp) => {
+      const b = inp.b ?? 1;
+      return { y: Math.abs(b) < 1e-12 ? 0 : (inp.a ?? 0) / b };
+    },
+  },
+
+  // ================ 결과 디스플레이 ================
+  display: {
+    typeNo: 901, name: 'Display', category: 'output', color: '#7c3aed', icon: Eye,
+    desc: '현재 값을 블록에 크게 표시',
+    parameters: [
+      { key: 'digits', label: 'Decimals', value: 3, unit: '' },
+      { key: 'label', label: 'Label', value: '', unit: '' },
+    ],
+    inputs: [{ key: 'x', label: 'x', unit: '' }],
+    outputs: [],
+    compute: () => ({}),
+  },
+
   plotter: {
     typeNo: 900, name: 'Plotter', category: 'output', color: '#7c3aed', icon: BarChart3,
     desc: '결과 시각화 (시계열)',
@@ -232,6 +331,7 @@ const TYPES = {
 
 const CATEGORY_STYLES = {
   source:      { bg: 'bg-slate-100',  text: 'text-slate-700', border: 'border-slate-300', badge: 'SRC' },
+  math:        { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', badge: 'MTH' },
   refrigerant: { bg: 'bg-red-50',     text: 'text-red-700',   border: 'border-red-200',   badge: 'REF' },
   air:         { bg: 'bg-cyan-50',    text: 'text-cyan-700',  border: 'border-cyan-200',  badge: 'AIR' },
   control:     { bg: 'bg-violet-50',  text: 'text-violet-700',border: 'border-violet-200',badge: 'CTL' },
@@ -319,7 +419,7 @@ export default function HPWDStudio() {
   const draggingConnRef = useRef(null);
   const mousePosRef = useRef({ x: 0, y: 0 });
   const rafRef = useRef(null);      // requestAnimationFrame id
-  const [expandedCats, setExpandedCats] = useState({ source: true, refrigerant: true, air: true, output: true });
+  const [expandedCats, setExpandedCats] = useState({ source: true, math: true, refrigerant: true, air: true, output: true });
 
   const handleLibraryDragStart = (e, typeKey) => {
     e.dataTransfer.setData('typeKey', typeKey);
@@ -847,7 +947,8 @@ export default function HPWDStudio() {
               const Icon = def.icon;
               const isSel = selected === block.id;
               const maxPorts = Math.max(def.inputs.length, def.outputs.length);
-              const height = Math.max(80, 45 + maxPorts * 20 + 10);
+              const baseMin = block.type === 'display' ? 70 : 80;
+              const height = Math.max(baseMin, 45 + maxPorts * 20 + 10);
               return (
                 <div
                   key={block.id}
@@ -868,6 +969,21 @@ export default function HPWDStudio() {
                     <span className="text-[9px] text-slate-400 font-mono">T{def.typeNo}</span>
                   </div>
                   <div className="relative" style={{ height: height - 24 }}>
+                    {/* Display 블록: 현재 값을 크게 표시 */}
+                    {block.type === 'display' && (() => {
+                      const val = block.lastInputs?.x;
+                      const digits = block.params.digits ?? 3;
+                      const label = block.params.label;
+                      const text = val === undefined
+                        ? '—'
+                        : (typeof val === 'number' ? val.toFixed(digits) : String(val));
+                      return (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none px-2">
+                          {label && <div className="text-[9px] text-slate-500 mb-0.5 truncate w-full text-center">{label}</div>}
+                          <div className="text-lg font-bold text-violet-700 font-mono tabular-nums">{text}</div>
+                        </div>
+                      );
+                    })()}
                     {def.inputs.map((p, i) => {
                       const isActive = connecting && connecting.blockId === block.id && connecting.portKey === p.key && connecting.direction === 'in';
                       // 원 중심이 block.y + 43 + i*20에 오도록 배치 (getPortPos와 일치)
