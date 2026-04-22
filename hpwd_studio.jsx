@@ -338,9 +338,45 @@ const CATEGORY_STYLES = {
   output:      { bg: 'bg-violet-50',  text: 'text-violet-700',border: 'border-violet-200',badge: 'OUT' },
 };
 
+// 그리드 크기 (px). 캔버스 배경 dot pattern과 동일.
+const GRID_SIZE = 20;
+const snap = (v) => Math.round(v / GRID_SIZE) * GRID_SIZE;
+
+// 선분이 사각형과 겹치는지 판정 (선분은 수평 또는 수직만 가정)
+function segmentIntersectsRect(x1, y1, x2, y2, rect) {
+  const PAD = 4; // 블록 테두리에 너무 붙지 않도록 여유
+  const rx1 = rect.x - PAD, ry1 = rect.y - PAD;
+  const rx2 = rect.x + rect.w + PAD, ry2 = rect.y + rect.h + PAD;
+  // 수평 선분
+  if (y1 === y2) {
+    if (y1 < ry1 || y1 > ry2) return false;
+    const sx1 = Math.min(x1, x2), sx2 = Math.max(x1, x2);
+    return !(sx2 < rx1 || sx1 > rx2);
+  }
+  // 수직 선분
+  if (x1 === x2) {
+    if (x1 < rx1 || x1 > rx2) return false;
+    const sy1 = Math.min(y1, y2), sy2 = Math.max(y1, y2);
+    return !(sy2 < ry1 || sy1 > ry2);
+  }
+  return false;
+}
+
+// 경로(세그먼트들의 꼭짓점 배열)가 어떤 장애물과라도 충돌하는지
+function pathHitsObstacles(points, obstacles) {
+  for (let i = 0; i < points.length - 1; i++) {
+    const [x1, y1] = points[i], [x2, y2] = points[i + 1];
+    for (const rect of obstacles) {
+      if (segmentIntersectsRect(x1, y1, x2, y2, rect)) return true;
+    }
+  }
+  return false;
+}
+
 // 직교(90도) 경로 계산. offsets로 각 세그먼트 위치 조정.
+// obstacles: [{x, y, w, h}] 블록 목록 → 이들을 피해가도록 midX/midY를 자동 조정.
 // returns { d, handles: [{segment, x, y, axis, segMin, segMax}] }
-function getOrthogonalPath(from, to, offsets = {}) {
+function getOrthogonalPath(from, to, offsets = {}, obstacles = []) {
   const MARGIN = 20;
   const STUB = 12;
   const {
@@ -353,7 +389,31 @@ function getOrthogonalPath(from, to, offsets = {}) {
   if (to.x >= from.x + MARGIN * 2) {
     // 일반 L→R: 3-세그먼트 (수평→수직→수평)
     const autoMid = (from.x + to.x) / 2;
-    const midX = Math.max(from.x + STUB, Math.min(to.x - STUB, autoMid + midOffsetX));
+    let midX = Math.max(from.x + STUB, Math.min(to.x - STUB, autoMid + midOffsetX));
+
+    // 장애물 회피: 사용자가 수동 오프셋을 주지 않았을 때만 자동 조정
+    if (midOffsetX === 0 && obstacles.length > 0) {
+      const testPath = () => [[from.x, from.y], [midX, from.y], [midX, to.y], [to.x, to.y]];
+      if (pathHitsObstacles(testPath(), obstacles)) {
+        // 후보 midX들을 훑으면서 첫 번째로 충돌 없는 위치 선택
+        // from.x+STUB부터 to.x-STUB까지 GRID 간격으로 탐색
+        const candidates = [];
+        const minX = from.x + STUB;
+        const maxX = to.x - STUB;
+        // 자동 중심에서 바깥으로 번갈아 탐색 (시각적으로 중앙 우선)
+        for (let d = 0; d <= maxX - minX; d += GRID_SIZE) {
+          const left = autoMid - d;
+          const right = autoMid + d;
+          if (left >= minX && left <= maxX) candidates.push(left);
+          if (d > 0 && right >= minX && right <= maxX) candidates.push(right);
+        }
+        for (const cand of candidates) {
+          midX = cand;
+          if (!pathHitsObstacles(testPath(), obstacles)) break;
+        }
+      }
+    }
+
     const segMin = Math.min(from.y, to.y);
     const segMax = Math.max(from.y, to.y);
     return {
@@ -368,13 +428,29 @@ function getOrthogonalPath(from, to, offsets = {}) {
   // 역참조(루프): 5-세그먼트 — 수평→수직→수평→수직→수평
   const autoOutX = from.x + MARGIN;
   const autoInX = to.x - MARGIN;
-  // from/to가 같은 y 근처면 기본 midY를 아래로 우회시킴 (시각적 U자 형태 유지)
   const autoMidY = Math.abs(from.y - to.y) < 20
     ? from.y + 50
     : (from.y + to.y) / 2;
   const outX = autoOutX + outOffsetX;
   const inX = autoInX + inOffsetX;
-  const midY = autoMidY + midOffsetY;
+  let midY = autoMidY + midOffsetY;
+
+  // 루프 라우팅 장애물 회피: midY를 블록 위/아래로 밀어냄
+  if (midOffsetY === 0 && obstacles.length > 0) {
+    const testPath = () => [[from.x, from.y], [outX, from.y], [outX, midY], [inX, midY], [inX, to.y], [to.x, to.y]];
+    if (pathHitsObstacles(testPath(), obstacles)) {
+      // 위/아래로 번갈아가며 스캔
+      for (let d = GRID_SIZE; d <= 400; d += GRID_SIZE) {
+        // 아래로
+        midY = autoMidY + d;
+        if (!pathHitsObstacles(testPath(), obstacles)) break;
+        // 위로
+        midY = autoMidY - d;
+        if (!pathHitsObstacles(testPath(), obstacles)) break;
+      }
+    }
+  }
+
   return {
     d: `M ${from.x} ${from.y} L ${outX} ${from.y} L ${outX} ${midY} L ${inX} ${midY} L ${inX} ${to.y} L ${to.x} ${to.y}`,
     isNormal: false,
@@ -439,7 +515,7 @@ export default function HPWDStudio() {
     const id = `b${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const params = Object.fromEntries(def.parameters.map(p => [p.key, p.value]));
     setBlocks(bs => [...bs, {
-      id, type: typeKey, x: x - 90, y: y - 40,
+      id, type: typeKey, x: snap(x - 90), y: snap(y - 40),
       name: `${def.name}_${bs.filter(b => b.type === typeKey).length + 1}`,
       params, outputs: {},
       state: def.stateInit ? JSON.parse(JSON.stringify(def.stateInit)) : {},
@@ -472,16 +548,16 @@ export default function HPWDStudio() {
     // 블록 드래그: DOM 직접 조작 (React state 건드리지 않음)
     if (draggingRef.current) {
       const { blockId, offsetX, offsetY, startX, startY } = draggingRef.current;
-      const newX = mx - offsetX;
-      const newY = my - offsetY;
+      // 드래그 중에도 실시간 그리드 스냅 적용 (시각적으로 딱딱 정렬되는 느낌)
+      const snappedX = snap(mx - offsetX);
+      const snappedY = snap(my - offsetY);
       const el = blockRefsMap.current[blockId];
       if (el) {
-        // transform으로 시각적 이동 (left/top은 원래 위치 유지)
-        el.style.transform = `translate(${newX - startX}px, ${newY - startY}px)`;
+        el.style.transform = `translate(${snappedX - startX}px, ${snappedY - startY}px)`;
       }
-      draggingRef.current.lastX = newX;
-      draggingRef.current.lastY = newY;
-      return; // 드래그 중엔 SVG, 연결선 업데이트 건너뜀 → 성능 확보
+      draggingRef.current.lastX = snappedX;
+      draggingRef.current.lastY = snappedY;
+      return;
     }
 
     // 연결선 드래그: 여전히 state 기반 (정밀도 필요)
@@ -504,12 +580,12 @@ export default function HPWDStudio() {
   const handleCanvasMouseUp = () => {
     if (draggingRef.current) {
       const { blockId, lastX, lastY } = draggingRef.current;
-      // DOM transform 제거하고 실제 좌표를 state에 반영
       const el = blockRefsMap.current[blockId];
       if (el) el.style.transform = '';
       if (lastX !== undefined) {
+        // 그리드 스냅: 20px 배수로 정렬
         setBlocks(bs => bs.map(b => b.id === blockId
-          ? { ...b, x: lastX, y: lastY } : b));
+          ? { ...b, x: snap(lastX), y: snap(lastY) } : b));
       }
       draggingRef.current = null;
     }
@@ -945,6 +1021,8 @@ export default function HPWDStudio() {
             onClick={() => { setConnecting(null); setSelected(null); setSelectedConn(null); }}
           >
             <svg className="absolute inset-0 pointer-events-none" width="100%" height="100%">
+              {/* 블록 높이를 미리 계산 (연결선 충돌 감지용 장애물 rect) */}
+              {(() => { return null; })()}
               {connections.map((c, i) => {
                 const fromBlock = blocks.find(b => b.id === c.from.blockId);
                 const toBlock = blocks.find(b => b.id === c.to.blockId);
@@ -952,18 +1030,29 @@ export default function HPWDStudio() {
                 const fromPos = getPortPos(fromBlock, c.from.portKey, 'out');
                 const toPos = getPortPos(toBlock, c.to.portKey, 'in');
                 if (!fromPos || !toPos) return null;
+
+                // 장애물: 자기 자신의 source/target을 제외한 다른 블록들
+                const obstacles = blocks
+                  .filter(b => b.id !== fromBlock.id && b.id !== toBlock.id)
+                  .map(b => {
+                    const def = TYPES[b.type];
+                    const maxPorts = Math.max(def.inputs.length, def.outputs.length);
+                    const baseMin = b.type === 'display' ? 70 : 80;
+                    const h = Math.max(baseMin, 45 + maxPorts * 20 + 10);
+                    return { x: b.x, y: b.y, w: 180, h };
+                  });
+
                 const path = getOrthogonalPath(fromPos, toPos, {
                   midOffsetX: c.midOffsetX ?? 0,
                   midOffsetY: c.midOffsetY ?? 0,
                   outOffsetX: c.outOffsetX ?? 0,
                   inOffsetX: c.inOffsetX ?? 0,
-                });
+                }, obstacles);
                 const isHovered = hoveredConn === i;
                 const isSelected = selectedConn === i;
                 const isDraggingThis = draggingConn?.idx === i;
                 const highlight = isSelected || isHovered || isDraggingThis;
 
-                // 삭제 버튼은 첫 번째 핸들 근처에 표시
                 const firstHandle = path.handles[0] || { x: 0, y: 0 };
 
                 return (
