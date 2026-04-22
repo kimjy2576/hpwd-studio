@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Play, Square, RotateCcw, Trash2, Save, FolderOpen, Settings, Activity, Zap, Wind, Droplet, Thermometer, Gauge, CircleDot, Box, BarChart3, ChevronRight, ChevronDown, Hash, TrendingUp, Waves, Plus, Minus, X, Divide, Eye } from 'lucide-react';
+import { Play, Square, RotateCcw, Trash2, Save, FolderOpen, Settings, Activity, Zap, Wind, Droplet, Thermometer, Gauge, CircleDot, Box, BarChart3, ChevronRight, ChevronDown, Hash, TrendingUp, Waves, Plus, Minus, X, Divide, Eye, Download } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
 const TYPES = {
@@ -654,6 +654,77 @@ export default function HPWDStudio() {
     reader.readAsText(file);
   };
 
+  // -------- CSV Export --------
+  // CSV 필드 이스케이프: 쉼표/따옴표/개행 포함 시 따옴표로 감싸고 내부 따옴표는 중복
+  const csvEscape = (v) => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  };
+
+  // 공통 다운로드 함수 (UTF-8 BOM 추가 → Excel에서 한글/숫자 정상 인식)
+  const downloadCsv = (filename, rows) => {
+    if (!rows || rows.length === 0) {
+      alert('내보낼 데이터가 없습니다. 먼저 시뮬레이션을 실행하세요.');
+      return;
+    }
+    const csv = '\ufeff' + rows.map(r => r.map(csvEscape).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // 전역 CSV: 모든 블록 출력 시계열
+  const exportAllCsv = () => {
+    if (simState.history.length === 0) {
+      alert('내보낼 데이터가 없습니다. 먼저 시뮬레이션을 실행하세요.');
+      return;
+    }
+    // 모든 키 수집 (t는 제일 앞)
+    const keySet = new Set();
+    simState.history.forEach(row => Object.keys(row).forEach(k => keySet.add(k)));
+    keySet.delete('t');
+    const keys = ['t', ...Array.from(keySet).sort()];
+    const rows = [keys];
+    simState.history.forEach(row => {
+      rows.push(keys.map(k => row[k] ?? ''));
+    });
+    downloadCsv(`hpwd_all_${Date.now()}.csv`, rows);
+  };
+
+  // 개별 Plotter CSV: 해당 플로터에 연결된 신호만
+  const exportPlotterCsv = (plotterBlock) => {
+    if (simState.history.length === 0) {
+      alert('내보낼 데이터가 없습니다. 먼저 시뮬레이션을 실행하세요.');
+      return;
+    }
+    const conns = connections.filter(c => c.to.blockId === plotterBlock.id);
+    const signals = conns.map(c => {
+      const src = blocks.find(b => b.id === c.from.blockId);
+      return src ? { key: `${src.name}.${c.from.portKey}`, port: c.to.portKey } : null;
+    }).filter(Boolean);
+
+    if (signals.length === 0) {
+      alert(`${plotterBlock.name}에 연결된 신호가 없습니다.`);
+      return;
+    }
+
+    // 헤더: t, y1(SrcName.out), y2(...), ...
+    const headers = ['t', ...signals.map(s => `${s.port}(${s.key})`)];
+    const rows = [headers];
+    simState.history.forEach(row => {
+      rows.push([row.t, ...signals.map(s => row[s.key] ?? '')]);
+    });
+    downloadCsv(`${plotterBlock.name}_${Date.now()}.csv`, rows);
+  };
+
   const getPortPos = (block, portKey, direction) => {
     const def = TYPES[block.type];
     const ports = direction === 'in' ? def.inputs : def.outputs;
@@ -708,6 +779,10 @@ export default function HPWDStudio() {
         <ToolBtn onClick={runSim} icon={Play} label="Run" disabled={simState.running} color="text-emerald-600 hover:bg-emerald-50" />
         <ToolBtn onClick={stopSim} icon={Square} label="Stop" disabled={!simState.running} color="text-red-600 hover:bg-red-50" />
         <ToolBtn onClick={resetSim} icon={RotateCcw} label="Reset" color="text-amber-600 hover:bg-amber-50" />
+        <div className="w-px h-5 bg-slate-200 mx-1.5" />
+        <ToolBtn onClick={exportAllCsv} icon={Download} label="Export CSV"
+                 disabled={simState.history.length === 0}
+                 color="text-sky-600 hover:bg-sky-50" />
         <div className="w-px h-5 bg-slate-200 mx-1.5" />
         <div className="flex items-center gap-2 text-[11px] text-slate-600">
           <label className="text-slate-500">dt</label>
@@ -1133,6 +1208,18 @@ export default function HPWDStudio() {
                 <span className="text-[10px] text-slate-500">· {selectedDef.name}</span>
               </div>
               <div className="text-[10px] text-slate-500 italic leading-relaxed">{selectedDef.desc}</div>
+
+              {/* Plotter 전용: 이 플로터의 신호만 CSV 내보내기 */}
+              {selectedBlock.type === 'plotter' && (
+                <button
+                  onClick={() => exportPlotterCsv(selectedBlock)}
+                  disabled={simState.history.length === 0}
+                  className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded text-[11px] text-sky-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  <Download size={11} />
+                  <span>이 Plotter 신호만 CSV로 내보내기</span>
+                </button>
+              )}
 
               {selectedDef.parameters.length > 0 && (
                 <div>
