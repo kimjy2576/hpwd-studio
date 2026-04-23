@@ -486,6 +486,10 @@ export default function HPWDStudio() {
   // 박스 드래그 선택 상태: {startX, startY, curX, curY}
   const [selectionBox, setSelectionBox] = useState(null);
 
+  // Save/Load 슬롯 모달: 'save' | 'load' | null
+  const [slotModal, setSlotModal] = useState(null);
+  const [slotList, setSlotList] = useState([]);  // 슬롯 메타데이터 목록
+
   // 편의를 위해 단일 선택 API를 다중으로 어댑트
   const selected = selectedIds.length > 0 ? selectedIds[selectedIds.length - 1] : null;
   const selectedConn = selectedConnIds.length > 0 ? selectedConnIds[selectedConnIds.length - 1] : null;
@@ -1031,7 +1035,102 @@ export default function HPWDStudio() {
     }));
   };
 
-  const saveProject = () => {
+  // -------- Slot Save/Load (localStorage) --------
+  const SLOT_INDEX_KEY = 'hpwd-studio-slots';
+  const SLOT_PREFIX = 'hpwd-studio-slot-';
+
+  const loadSlotIndex = () => {
+    try {
+      const raw = localStorage.getItem(SLOT_INDEX_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  };
+
+  const saveSlotIndex = (slots) => {
+    try { localStorage.setItem(SLOT_INDEX_KEY, JSON.stringify(slots)); } catch (err) {
+      alert('슬롯 인덱스 저장 실패: ' + err.message);
+    }
+  };
+
+  // 현재 프로젝트를 슬롯으로 저장 (새 슬롯 또는 덮어쓰기)
+  const saveSlot = (name, existingId = null) => {
+    const slots = loadSlotIndex();
+    const now = Date.now();
+    const id = existingId || `slot_${now}_${Math.random().toString(36).slice(2, 6)}`;
+    const data = {
+      id, name, savedAt: now,
+      blocks: JSON.parse(JSON.stringify(blocks)),
+      connections: JSON.parse(JSON.stringify(connections)),
+      simState: { dt: simState.dt, t_final: simState.t_final },
+    };
+    try {
+      localStorage.setItem(SLOT_PREFIX + id, JSON.stringify(data));
+    } catch (err) {
+      alert('슬롯 저장 실패 (용량 초과 가능성): ' + err.message);
+      return false;
+    }
+    // 인덱스 업데이트 (덮어쓰기면 교체, 신규면 추가)
+    const meta = {
+      id, name, savedAt: now,
+      blockCount: blocks.length,
+      connectionCount: connections.length,
+    };
+    const updated = existingId
+      ? slots.map(s => s.id === existingId ? meta : s)
+      : [...slots, meta];
+    saveSlotIndex(updated);
+    return true;
+  };
+
+  const loadSlot = (id) => {
+    try {
+      const raw = localStorage.getItem(SLOT_PREFIX + id);
+      if (!raw) { alert('슬롯 데이터를 찾을 수 없습니다'); return false; }
+      const data = JSON.parse(raw);
+      setBlocks(data.blocks || []);
+      setConnections(data.connections || []);
+      if (data.simState) setSimState(s => ({ ...s, ...data.simState, running: false, t: 0, history: [] }));
+      setSelectedIds([]);
+      setSelectedConnIds([]);
+      return true;
+    } catch (err) {
+      alert('슬롯 로드 실패: ' + err.message);
+      return false;
+    }
+  };
+
+  const deleteSlot = (id) => {
+    localStorage.removeItem(SLOT_PREFIX + id);
+    saveSlotIndex(loadSlotIndex().filter(s => s.id !== id));
+  };
+
+  const renameSlot = (id, newName) => {
+    const slots = loadSlotIndex();
+    const slot = slots.find(s => s.id === id);
+    if (!slot) return;
+    slot.name = newName;
+    saveSlotIndex(slots);
+    // 슬롯 데이터 자체에도 이름 반영
+    try {
+      const raw = localStorage.getItem(SLOT_PREFIX + id);
+      if (raw) {
+        const data = JSON.parse(raw);
+        data.name = newName;
+        localStorage.setItem(SLOT_PREFIX + id, JSON.stringify(data));
+      }
+    } catch { /* ignore */ }
+  };
+
+  // 모달 열 때 슬롯 목록 갱신
+  const openSlotModal = (mode) => {
+    setSlotList(loadSlotIndex());
+    setSlotModal(mode);
+  };
+
+  const refreshSlotList = () => setSlotList(loadSlotIndex());
+
+  // -------- JSON File Export/Import (기존 기능, 백업 용도) --------
+  const exportProjectFile = () => {
     const data = { blocks, connections, simState: { dt: simState.dt, t_final: simState.t_final } };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1042,7 +1141,7 @@ export default function HPWDStudio() {
     URL.revokeObjectURL(url);
   };
 
-  const loadProject = (e) => {
+  const importProjectFile = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -1055,6 +1154,7 @@ export default function HPWDStudio() {
       } catch (err) { alert('Failed to load: ' + err.message); }
     };
     reader.readAsText(file);
+    e.target.value = ''; // 같은 파일 재선택 가능하게
   };
 
   // -------- CSV Export --------
@@ -1173,11 +1273,8 @@ export default function HPWDStudio() {
 
       {/* Toolbar */}
       <div className="h-11 bg-slate-50 border-b border-slate-200 flex items-center px-3 gap-1 shrink-0">
-        <ToolBtn onClick={saveProject} icon={Save} label="Save" />
-        <label className="inline-flex">
-          <ToolBtn as="span" icon={FolderOpen} label="Load" />
-          <input type="file" accept=".json" className="hidden" onChange={loadProject} />
-        </label>
+        <ToolBtn onClick={() => openSlotModal('save')} icon={Save} label="Save" title="프로젝트를 슬롯에 저장" />
+        <ToolBtn onClick={() => openSlotModal('load')} icon={FolderOpen} label="Load" title="슬롯에서 프로젝트 불러오기" />
         <div className="w-px h-5 bg-slate-200 mx-1.5" />
         <ToolBtn onClick={doUndo} icon={Undo} label="Undo" disabled={undoStack.length === 0}
                  title="Ctrl+Z" />
@@ -1812,6 +1909,35 @@ export default function HPWDStudio() {
         <div className="flex-1" />
         <span>HPWD Simulation Studio · quasi-steady seq. subst.</span>
       </div>
+
+      {/* Slot Save/Load Modal */}
+      {slotModal && (
+        <SlotModal
+          mode={slotModal}
+          slots={slotList}
+          onClose={() => setSlotModal(null)}
+          onSave={(name, existingId) => {
+            if (saveSlot(name, existingId)) {
+              refreshSlotList();
+            }
+          }}
+          onLoad={(id) => {
+            if (loadSlot(id)) setSlotModal(null);
+          }}
+          onDelete={(id) => {
+            deleteSlot(id);
+            refreshSlotList();
+          }}
+          onRename={(id, newName) => {
+            renameSlot(id, newName);
+            refreshSlotList();
+          }}
+          onExportFile={exportProjectFile}
+          onImportFile={importProjectFile}
+          currentBlockCount={blocks.length}
+          currentConnectionCount={connections.length}
+        />
+      )}
     </div>
   );
 }
@@ -1827,5 +1953,213 @@ function ToolBtn({ icon: Icon, label, onClick, disabled, color = 'text-slate-700
       <Icon size={13} />
       <span>{label}</span>
     </Comp>
+  );
+}
+
+// =============================================================
+// SlotModal — 세이브 슬롯 관리 UI
+// =============================================================
+function SlotModal({ mode, slots, onClose, onSave, onLoad, onDelete, onRename, onExportFile, onImportFile, currentBlockCount, currentConnectionCount }) {
+  const [newName, setNewName] = useState('');
+  const [renamingId, setRenamingId] = useState(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const sortedSlots = [...slots].sort((a, b) => b.savedAt - a.savedAt);
+
+  const fmtDate = (ts) => {
+    const d = new Date(ts);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+
+  const handleNewSave = () => {
+    const name = newName.trim() || `Untitled ${fmtDate(Date.now())}`;
+    onSave(name, null);
+    setNewName('');
+  };
+
+  const handleOverwrite = (slot) => {
+    if (confirm(`"${slot.name}" 슬롯을 현재 상태로 덮어쓸까요?`)) {
+      onSave(slot.name, slot.id);
+    }
+  };
+
+  const handleRenameStart = (slot) => {
+    setRenamingId(slot.id);
+    setRenameValue(slot.name);
+  };
+
+  const handleRenameCommit = (id) => {
+    const v = renameValue.trim();
+    if (v) onRename(id, v);
+    setRenamingId(null);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-lg shadow-2xl border border-slate-200 w-[560px] max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-semibold text-slate-900">
+              {mode === 'save' ? '프로젝트 저장' : '프로젝트 불러오기'}
+            </div>
+            <div className="text-[11px] text-slate-500 font-mono">
+              {mode === 'save'
+                ? `현재: 블록 ${currentBlockCount} · 연결선 ${currentConnectionCount}`
+                : `저장된 슬롯 ${slots.length}개 · 브라우저에 로컬 저장됨`}
+            </div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-xl leading-none px-2">
+            ×
+          </button>
+        </div>
+
+        {/* Save mode: 새 슬롯 입력 */}
+        {mode === 'save' && (
+          <div className="px-5 py-3 bg-slate-50 border-b border-slate-200 flex items-center gap-2">
+            <input
+              type="text"
+              placeholder="새 슬롯 이름 (비워두면 시간 기반 자동 명명)"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleNewSave(); }}
+              className="flex-1 px-2.5 py-1.5 text-[12px] bg-white border border-slate-300 rounded focus:outline-none focus:border-cyan-500"
+              autoFocus
+            />
+            <button
+              onClick={handleNewSave}
+              className="px-3 py-1.5 text-[12px] bg-cyan-600 text-white rounded hover:bg-cyan-700 transition-colors font-medium"
+            >
+              새 슬롯으로 저장
+            </button>
+          </div>
+        )}
+
+        {/* Slot list */}
+        <div className="flex-1 overflow-y-auto">
+          {sortedSlots.length === 0 ? (
+            <div className="p-10 text-center text-slate-400 text-[12px]">
+              저장된 슬롯이 없습니다
+              {mode === 'load' && <div className="mt-2 text-[11px]">먼저 Save에서 슬롯을 만들어보세요</div>}
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {sortedSlots.map((slot) => (
+                <div key={slot.id} className="px-5 py-3 hover:bg-slate-50 group flex items-center gap-3">
+                  <div className="flex-1 min-w-0">
+                    {renamingId === slot.id ? (
+                      <input
+                        type="text"
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleRenameCommit(slot.id);
+                          else if (e.key === 'Escape') setRenamingId(null);
+                        }}
+                        onBlur={() => handleRenameCommit(slot.id)}
+                        autoFocus
+                        className="w-full px-1.5 py-0.5 text-[12px] bg-white border border-cyan-500 rounded focus:outline-none"
+                      />
+                    ) : (
+                      <div className="text-[13px] font-medium text-slate-900 truncate">{slot.name}</div>
+                    )}
+                    <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                      {fmtDate(slot.savedAt)} · 블록 {slot.blockCount} · 연결선 {slot.connectionCount}
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-1">
+                    {mode === 'load' ? (
+                      <button
+                        onClick={() => onLoad(slot.id)}
+                        className="px-2.5 py-1 text-[11px] bg-cyan-50 hover:bg-cyan-100 text-cyan-700 border border-cyan-200 rounded transition-colors"
+                      >
+                        불러오기
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => handleOverwrite(slot)}
+                        className="px-2.5 py-1 text-[11px] bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 rounded transition-colors"
+                      >
+                        덮어쓰기
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleRenameStart(slot)}
+                      className="px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100 rounded transition-colors"
+                      title="이름 변경"
+                    >
+                      ✎
+                    </button>
+                    {confirmDeleteId === slot.id ? (
+                      <>
+                        <button
+                          onClick={() => { onDelete(slot.id); setConfirmDeleteId(null); }}
+                          className="px-2 py-1 text-[11px] bg-red-600 text-white rounded hover:bg-red-700"
+                        >
+                          확인
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="px-2 py-1 text-[11px] text-slate-500 hover:bg-slate-100 rounded"
+                        >
+                          취소
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteId(slot.id)}
+                        className="px-2 py-1 text-[11px] text-red-500 hover:bg-red-50 rounded transition-colors"
+                        title="삭제"
+                      >
+                        🗑
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Footer: JSON 파일 Export/Import */}
+        <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-[11px]">
+          <span className="text-slate-500">
+            백업/공유용:
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onExportFile}
+              className="px-2.5 py-1 text-[11px] text-slate-700 border border-slate-300 rounded hover:bg-white transition-colors"
+            >
+              JSON 파일로 내보내기
+            </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="px-2.5 py-1 text-[11px] text-slate-700 border border-slate-300 rounded hover:bg-white transition-colors"
+            >
+              JSON 파일 가져오기
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              className="hidden"
+              onChange={onImportFile}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
