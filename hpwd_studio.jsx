@@ -546,8 +546,9 @@ export default function HPWDStudio() {
   };
 
   const handleBlockMouseDown = (e, blockId) => {
-    if (e.target.closest('[data-port]')) return;
+    // Port 클릭 시에도 이벤트 전파는 막아야 함 (안 그러면 캔버스 박스 드래그 시작됨)
     e.stopPropagation();
+    if (e.target.closest('[data-port]')) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const block = blocks.find(b => b.id === blockId);
 
@@ -1522,6 +1523,7 @@ export default function HPWDStudio() {
                         <div
                           key={p.key}
                           data-port="in"
+                          onMouseDown={(e) => e.stopPropagation()}
                           onClick={(e) => handlePortClick(e, block.id, p.key, 'in')}
                           className={`absolute flex items-center cursor-crosshair rounded transition-colors ${
                             isActive ? 'bg-cyan-100' : 'hover:bg-cyan-50'
@@ -1551,6 +1553,7 @@ export default function HPWDStudio() {
                         <div
                           key={p.key}
                           data-port="out"
+                          onMouseDown={(e) => e.stopPropagation()}
                           onClick={(e) => handlePortClick(e, block.id, p.key, 'out')}
                           className={`absolute flex items-center flex-row-reverse cursor-crosshair rounded transition-colors ${
                             isActive ? 'bg-amber-100' : 'hover:bg-amber-50'
